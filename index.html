@@ -7,11 +7,14 @@
 <style>
 /* ===== HOW TO USE =====
  Each book = a folder:  books/NAME/book.json + page images.
- Open the reader with:  reader.html?book=NAME
+ Open the reader with:  index.html?book=NAME
  book.json example:
  { "title": "My Bear Book",
    "pages": ["1.jpg","2.jpg","3.jpg"],
    "audio": ["1.mp3","2.mp3","3.mp3"] }   <- audio is optional
+ book.json is optional: if it is empty or has no "pages", the reader
+ automatically uses 1.jpg, 2.jpg, 3.jpg ... in the same folder.
+ File names are case-sensitive on GitHub Pages (1.jpg is not 1.JPG).
  With no ?book= the demo book below is shown. */
 html,body{margin:0;height:100%;background:#fff7e6;font-family:Arial,sans-serif;
   overflow:hidden;user-select:none;-webkit-user-select:none;touch-action:manipulation}
@@ -19,19 +22,24 @@ html,body{margin:0;height:100%;background:#fff7e6;font-family:Arial,sans-serif;
 #stage{flex:1;display:flex;align-items:center;justify-content:center;min-height:0;padding:8px}
 #page{max-width:100%;max-height:100%;border-radius:16px;box-shadow:0 4px 14px rgba(0,0,0,.25);
   background:#fff;object-fit:contain;pointer-events:none}
+#msg{text-align:center;color:#a67c00;font-size:clamp(22px,5vw,36px);padding:20px}
+#msg small{display:block;margin-top:12px;font-size:clamp(14px,3vw,20px);opacity:.8}
 #bar{display:flex;gap:12px;justify-content:center;align-items:center;padding:10px}
 button{border:0;border-radius:50px;font-size:clamp(20px,5vw,34px);font-weight:bold;color:#fff;
   min-width:clamp(90px,22vw,170px);height:clamp(60px,14vw,90px);cursor:pointer;
   box-shadow:0 5px 0 rgba(0,0,0,.25)}
 button:active{transform:translateY(4px);box-shadow:0 1px 0 rgba(0,0,0,.25)}
 #back{background:#4a90e2}#next{background:#43b649}#again{background:#f5a623}#sound{background:#9b59b6;min-width:clamp(60px,14vw,90px)}
-button[hidden]{display:none}
+button[hidden],#msg[hidden],#page[hidden],#bar[hidden]{display:none}
 #dots{font-size:18px;color:#a67c00;min-width:60px;text-align:center}
 </style>
 </head>
 <body>
 <div id="app">
-  <div id="stage"><img id="page" alt="Book page" draggable="false"></div>
+  <div id="stage">
+    <img id="page" alt="Book page" draggable="false">
+    <div id="msg" hidden></div>
+  </div>
   <div id="bar">
     <button id="back" aria-label="Back">◀</button>
     <button id="sound" aria-label="Play sound" hidden>🔊</button>
@@ -51,10 +59,23 @@ const DEMO={title:"Demo",base:"",audio:[],
   pages:[demoPage(1,"#e74c3c","Page 1"),demoPage(2,"#3498db","Page 2"),demoPage(3,"#2ecc71","Page 3"),demoPage(4,"#f39c12","The End")]};
 
 const $=id=>document.getElementById(id);
-const img=$("page"),back=$("back"),next=$("next"),again=$("again"),sound=$("sound"),dots=$("dots"),audio=$("audio");
-let book=DEMO,i=0;
+const img=$("page"),back=$("back"),next=$("next"),again=$("again"),sound=$("sound"),dots=$("dots"),audio=$("audio"),msg=$("msg"),bar=$("bar");
+let book=null,i=0;
+
+function fail(text,detail){
+  book=null;
+  audio.pause();
+  img.hidden=true;
+  bar.hidden=true;
+  msg.hidden=false;
+  msg.textContent=text;
+  if(detail){const s=document.createElement("small");s.textContent=detail;msg.appendChild(s);}
+}
 
 function show(){
+  if(!book)return;
+  img.hidden=false;
+  img.onerror=()=>fail("A page picture is missing","Could not load: "+book.pages[i]+" (check the file name and capital letters)");
   img.src=book.base+book.pages[i];
   const last=i===book.pages.length-1;
   back.style.visibility=i===0?"hidden":"visible";
@@ -67,10 +88,14 @@ function show(){
   // preload next page
   if(!last){const p=new Image();p.src=book.base+book.pages[i+1];}
 }
-function go(d){const n=i+d;if(n>=0&&n<book.pages.length){i=n;show();}}
+function go(d){
+  if(!book)return;
+  const n=i+d;
+  if(n>=0&&n<book.pages.length){i=n;show();}
+}
 next.onclick=()=>go(1);
 back.onclick=()=>go(-1);
-again.onclick=()=>{i=0;show();};
+again.onclick=()=>{if(book){i=0;show();}};
 sound.onclick=()=>{audio.currentTime=0;audio.play().catch(()=>{});};
 
 // Swipe support
@@ -85,13 +110,46 @@ document.addEventListener("keydown",e=>{if(e.key==="ArrowRight")go(1);if(e.key==
 document.addEventListener("contextmenu",e=>e.preventDefault());
 
 const name=new URLSearchParams(location.search).get("book");
-if(name&&/^[\w-]+$/.test(name)){
+if(name===null){
+  book=DEMO;show();
+}else if(!/^[\w-]+$/.test(name)){
+  fail("Book not found","Book names can only use letters, numbers, - and _");
+}else{
   const base="books/"+name+"/";
-  fetch(base+"book.json").then(r=>r.json()).then(b=>{
-    book={title:b.title,pages:b.pages,audio:b.audio||[],base:base};
-    document.title=b.title||"Storybook";show();
-  }).catch(()=>{img.alt="Book not found";});
-}else show();
+
+  // Checks whether an image file exists
+  const exists=src=>new Promise(res=>{const t=new Image();t.onload=()=>res(true);t.onerror=()=>res(false);t.src=src;});
+
+  // Finds 1.jpg, 2.jpg, 3.jpg ... until one is missing (also tries png/jpeg/webp)
+  async function detectPages(){
+    for(const ext of ["jpg","png","jpeg","webp","JPG","PNG"]){
+      if(!(await exists(base+"1."+ext)))continue;
+      const pages=["1."+ext];
+      for(let n=2;n<=300;n++){
+        if(await exists(base+n+"."+ext))pages.push(n+"."+ext);else break;
+      }
+      return pages;
+    }
+    return [];
+  }
+
+  (async()=>{
+    let b=null;
+    try{
+      const r=await fetch(base+"book.json");
+      if(r.ok)b=await r.json();
+    }catch(e){/* empty or invalid book.json: fall back to auto-detect */}
+
+    let pages=b&&Array.isArray(b.pages)&&b.pages.length?b.pages:await detectPages();
+    if(!pages.length){
+      fail("Book not found","No pages found in books/"+name+"/ (look for 1.jpg, 2.jpg, 3.jpg ... and check capital letters)");
+      return;
+    }
+    book={title:(b&&b.title)||name,pages:pages,audio:(b&&b.audio)||[],base:base};
+    document.title=book.title;
+    show();
+  })();
+}
 </script>
 </body>
 </html>
